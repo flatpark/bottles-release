@@ -9,8 +9,11 @@ on:
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
-# 两个 run 会往同一个 release tag 上传同名产物,串行化避免互相踩。
-# cancel-in-progress: false —— 跑到一半的构建有价值,让它跑完再排下一个。
+# Two runs would upload identically named assets to the same release tag.
+# Serialise them so one cannot clobber the other mid-upload, which would leave
+# the tarball and its sha256 out of sync.
+# cancel-in-progress: false — a half-finished build is worth keeping; let it
+# finish and queue the next one behind it.
 concurrency:
   group: build
   cancel-in-progress: false
@@ -20,29 +23,34 @@ permissions:
 
 jobs:
   build:
-    # ubuntu-latest(=24.04)换上 20260816.277 那版镜像后,Install build tools
-    # 里的 apt-get 会无限挂起 —— #4 和 #5 都停在同一条命令上,各耗掉一小时,
-    # 而同一段脚本在换镜像之前是几十秒的事。26.04 目前还是 public preview,
-    # 这里只是用它绕开那版镜像;24.04 修好之后换回 ubuntu-latest。
+    # ubuntu-latest (= 24.04) started hanging indefinitely in apt-get inside
+    # "Install build tools" after image 20260816.277 — runs #4 and #5 both stalled
+    # on the same command and burned an hour each, while the very same script took
+    # seconds on the previous image. 26.04 is still public preview; it is used here
+    # only to route around that image. Switch back to ubuntu-latest once 24.04 is
+    # fixed.
     runs-on: ubuntu-26.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
-      # 构建要 ~15G:源码 + SDK + Wine base + build dir。runner 自带的
-      # Android/。NET/Haskell 工具链占了十几个 G,先腾出来。
+      # The build needs ~15G: sources + SDK + Wine base + build dir. The runner's
+      # preinstalled Android/.NET/Haskell toolchains hold on to a dozen or more.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
                       /usr/local/share/boost /usr/share/swift
           df -h /
 
-      # 发行版的 flatpak-builder(noble 是 1.4.2)只用来解析依赖 —— 那步不涉及
-      # libdir。真正的构建走 org.flatpak.Builder:noble 那个 1.4.2 不给 meson 传
-      # --libdir=lib,而 SDK 沙箱里没有 /etc/debian_version、/usr/lib64 又是真目录,
-      # 于是 meson 按默认逻辑选 lib64 —— libportal 和 vte 的 .so、typelib、pkgconfig
-      # 全落到 /app/lib64,不在 LD_LIBRARY_PATH 上,Bottles 的终端和文件门户直接废。
-      # org.flatpak.Builder 是 Flathub 自己构建时用的那份,跟着上游走。
+      # The distro's flatpak-builder is used only to resolve dependencies — that
+      # step does not involve libdir. The build itself goes through
+      # org.flatpak.Builder, because the distro package (1.4.2 on noble) does not
+      # pass --libdir=lib to meson. Inside the SDK sandbox there is no
+      # /etc/debian_version and /usr/lib64 is a real directory, so meson's default
+      # logic picks lib64 — the .so files, typelibs and pkgconfig of libportal and
+      # vte all land in /app/lib64, off LD_LIBRARY_PATH, and Bottles' terminal and
+      # file portal silently break. org.flatpak.Builder is the one Flathub builds
+      # with, so it tracks upstream.
       - name: Install build tools
         run: |
           sudo apt-get update
@@ -50,6 +58,7 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub \
               https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.flatpak.Builder
+          # org.flatpak.Builder needs a session bus; a headless runner has none.
           dbus-run-session -- flatpak run --filesystem=host org.flatpak.Builder --version
 
       - name: Resolve Bottles version
@@ -57,7 +66,7 @@ jobs:
         run: |
           v=$(sed -n "s/^ *tag: *'\{0,1\}\([0-9.]*\)'\{0,1\} *$/\1/p" \
               com.usebottles.bottles.src.yaml | head -n1)
-          [ -n "$v" ] || { echo "无法从 src.yaml 解析 Bottles 版本" >&2; exit 1; }
+          [ -n "$v" ] || { echo "cannot parse the Bottles version from src.yaml" >&2; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Bottles $v"
 
@@ -72,13 +81,16 @@ jobs:
               --user --force-clean --disable-rofiles-fuse --ccache=false \
               build com.usebottles.bottles.yml
 
-      # 这棵树在 FlatPark 侧会被解到 /app/extra/bottles 而不是 /app,
-      # 所以把写死 /app 的 RUNPATH 改成 $ORIGIN 相对。脚本自带复核,残留即失败。
+      # On the FlatPark side this tree is unpacked to /app/extra/bottles rather
+      # than /app, so rewrite the RUNPATHs that hardcode /app into $ORIGIN-relative
+      # ones. The script verifies its own work and fails on any leftover.
       - name: Relocate RUNPATHs
         run: python3 scripts/relocate.py build/files
 
-      # FlatPark 不发 .Debug 扩展,54M 的调试符号白占负载。在这儿剔掉而不是给
-      # manifest 加 no-debuginfo,是为了让 fork 与上游保持一行之差。
+      # FlatPark ships no .Debug extension, so 54M of debug symbols would ride
+      # along for nobody's benefit. Dropped here rather than by adding
+      # no-debuginfo to the manifest, so the fork stays one line away from
+      # upstream.
       - name: Drop debug symbols
         run: |
           du -sh build/files/lib/debug || true
@@ -93,27 +105,29 @@ jobs:
         run: |
           set -e
           for f in bin/wine bin/wineserver bin/bottles bin/bottles-cli \
+                   share/wine/wine.inf \
                    share/bottles/bottles.gresource share/bottles/data.gresource; do
-            [ -e "build/files/$f" ] || { echo "产物缺少 $f" >&2; exit 1; }
+            [ -e "build/files/$f" ] || { echo "artifact is missing $f" >&2; exit 1; }
           done
-          # 扩展挂载点必须在树里存在,否则 FlatPark 壳挂不上
+          # These mount points must exist in the tree or the FlatPark shell cannot
+          # mount its extensions into them.
           for d in lib/i386-linux-gnu lib/i386-linux-gnu/GL \
-                   lib/i386-linux-gnu/codecs-extra share/wine/gecko share/wine/mono; do
-            [ -d "build/files/$d" ] || { echo "产物缺少挂载点目录 $d" >&2; exit 1; }
+                   lib/i386-linux-gnu/codecs-extra; do
+            [ -d "build/files/$d" ] || { echo "artifact is missing mount point $d" >&2; exit 1; }
           done
-          # 扩展挂载点必须在树里存在,否则 FlatPark 壳挂不上
-          # meson 的 libdir 一旦选成 lib64,libportal/vte 的 .so 和 typelib 就会
-          # 落在 LD_LIBRARY_PATH 之外 —— 应用照样打包成功,但终端和门户是坏的。
-          # 这是静默故障,所以在这儿拦死。
+          # Once meson picks lib64 for libdir, the .so files and typelibs of
+          # libportal and vte land off LD_LIBRARY_PATH. The app still packages and
+          # starts, but its terminal and file portal are broken. That is a silent
+          # failure, so stop it here.
           [ ! -d build/files/lib64 ] || {
-            echo "产物里出现了 lib64,meson 的 libdir 选错了:" >&2
+            echo "artifact contains lib64 — meson picked the wrong libdir:" >&2
             find build/files/lib64 -maxdepth 2 >&2
             exit 1
           }
           for f in lib/libvte-2.91-gtk4.so.0 lib/libportal.so.1 lib/libportal-gtk4.so.1 \
                    lib/girepository-1.0/Vte-3.91.typelib \
                    lib/girepository-1.0/Xdp-1.0.typelib; do
-            [ -e "build/files/$f" ] || { echo "产物缺少 $f" >&2; exit 1; }
+            [ -e "build/files/$f" ] || { echo "artifact is missing $f" >&2; exit 1; }
           done
 
       - name: Package
@@ -135,13 +149,13 @@ jobs:
           tag="v$v"
           name=${{ steps.pkg.outputs.name }}
           notes=$(printf '%s\n' \
-            "Bottles $v,对着 GNOME 50 运行时构建,供 FlatPark 以 extra-data 消费。" \
+            "Bottles $v, built against the GNOME 50 runtime, for FlatPark to consume as extra-data." \
             "" \
-            "- \`$name\` — 整棵 /app 树,RUNPATH 已改写为 \$ORIGIN 相对" \
+            "- \`$name\` — the whole /app tree, RUNPATHs rewritten to be \$ORIGIN-relative" \
             "- size: ${{ steps.pkg.outputs.size }}" \
-            "- \`layout.json\` — lib/ 与 share/ 子目录清单,FlatPark 壳据此校验软链列表" \
+            "- \`layout.json\` — the lib/ and share/ subdirectory listing the FlatPark shell checks its symlink lists against" \
             "" \
-            "构建配方即本仓库,满足 GPL-3.0 的源码提供义务。")
+            "The build recipe is this repository, which satisfies the GPL-3.0 obligation to offer the corresponding source.")
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --title "Bottles $v" --notes "$notes"
           gh release upload "$tag" "$name" "$name.sha256" layout.json --clobber

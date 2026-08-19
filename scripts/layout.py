@@ -1,25 +1,33 @@
 #!/usr/bin/env python3
-"""导出产物的 lib/ 与 share/ 子目录清单。
+"""Emit the lib/ and share/ subdirectory listing of the artifact.
 
-FlatPark 的壳 manifest 里,/app/lib 和 /app/share 必须是真目录(flatpak-builder
-构建期要在里面建扩展挂载点,穿不过悬空软链),所以它按子目录粒度软链回 payload,
-而那份列表是写死在壳 manifest 里的。这个文件让 FlatPark 侧的 resolve-update.sh
-能在刷 pin 时比对——payload 长出新子目录而壳没跟上,就当场报错,而不是等用户
-装完发现某个路径是空的。
+In the FlatPark shell manifest, /app/lib and /app/share must be real directories:
+flatpak-builder creates extension mount points inside them at build time and
+cannot traverse a dangling symlink to do so. The shell therefore symlinks back
+into the payload one subdirectory at a time, and that list is hardcoded in the
+shell manifest. This file lets FlatPark's resolve-update.sh compare the two when
+refreshing the pin — if the payload grows a subdirectory the shell has not caught
+up with, the refresh fails right there instead of shipping a package where some
+path silently resolves to nothing.
 
-用法: layout.py <tree> > layout.json
+Usage: layout.py <tree> > layout.json
 """
 import json
 import os
 import sys
 
-# 这些必须由 /app 真实持有,不能软链走:
-#   lib/i386-linux-gnu  -> Compat.i386 / GL32 / codecs_extra.i386 的挂载点,
-#                          且运行时的 /lib/i386-linux-gnu 写死指向它
-#   share/{applications,icons,metainfo} -> 壳自带副本,构建期要导出
-#   share/{wine,steam}  -> Wine.gecko / Wine.mono / Steam.CompatibilityTool 挂载点
-#   share/app-info      -> flatpak-builder 构建期要往 share/app-info/xmls 写自己
-#                          编译的 AppStream,悬空软链会让 appstreamcli compose 失败
+# These must be owned by /app itself and cannot be symlinked away:
+#   lib/i386-linux-gnu  -> mount point for Compat.i386 / GL32 / codecs_extra.i386.
+#                          The path is fixed: the runtime's /lib/i386-linux-gnu is
+#                          a hardcoded symlink to it.
+#   share/{applications,icons,metainfo}
+#                       -> the shell ships its own copies; flatpak exports them at
+#                          build time.
+#   share/{wine,steam}  -> wine's own data directory, and the mount point for
+#                          Steam.CompatibilityTool.
+#   share/app-info      -> flatpak-builder writes its own compiled AppStream into
+#                          share/app-info/xmls at build time; a dangling symlink
+#                          makes appstreamcli compose fail.
 RESERVED = {"lib": {"i386-linux-gnu"},
             "share": {"applications", "icons", "metainfo", "wine", "steam", "app-info"}}
 

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""把构建产物里指向 /app 的绝对 RUNPATH 改写成 $ORIGIN 相对路径。
+"""Rewrite RUNPATHs that hardcode /app into $ORIGIN-relative ones.
 
-FlatPark 侧这棵树不落在 /app,而是被 extra-data 解到 /app/extra/bottles。
-wine / bottles-cli / libvte 等主要二进制本来就没有 RUNPATH(靠 LD_LIBRARY_PATH),
-但 wine 捆绑的 samba 有几百个库把 /app/lib/samba 写死在 RUNPATH 里,搬家后就断了。
-改成 $ORIGIN 相对路径后,这棵树放在哪都能自洽。
+On the FlatPark side this tree does not live at /app: extra-data unpacks it to
+/app/extra/bottles. The main binaries — wine, bottles-cli, libvte — carry no
+RUNPATH at all and find their libraries through LD_LIBRARY_PATH, so they survive
+the move untouched. But the samba libraries bundled with wine hardcode
+/app/lib/samba in several hundred RUNPATHs, which breaks once the tree moves.
+Rewriting them to be $ORIGIN-relative makes the tree self-consistent wherever it
+is unpacked.
 
-用法: relocate.py <tree>     # tree 是构建出来的 files/ 目录
+Usage: relocate.py <tree>     # tree is the built files/ directory
 """
 import os
 import subprocess
@@ -47,7 +50,7 @@ def main(root):
                 rel = os.path.relpath(target, dirpath)
                 out.append("$ORIGIN" if rel == "." else "$ORIGIN/" + rel)
             elif entry.startswith("/run/build"):
-                continue  # 构建期残留,丢掉
+                continue  # build-time leftover, drop it
             else:
                 out.append(entry)
         r = subprocess.run(["patchelf", "--set-rpath", ":".join(out), f],
@@ -58,7 +61,7 @@ def main(root):
         else:
             patched += 1
 
-    # 复核:一个都不能剩
+    # Verify: not a single one may remain.
     leftover = [f for _, f in iter_elf(root) if "/app" in rpath(f)]
     print(f"patched={patched} failed={failed} leftover={len(leftover)}")
     for f in leftover[:20]:

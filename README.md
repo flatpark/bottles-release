@@ -1,71 +1,97 @@
 # bottles-release
 
-给 [FlatPark](https://flatpark.org) 用的 Bottles 预编译产物。
+Prebuilt Bottles artifacts for [FlatPark](https://flatpark.org).
 
-这里构建 Bottles 的完整 `/app` 树并挂到 GitHub release;FlatPark 侧的
-`registry/com.usebottles.bottles/` 用 **extra-data** 从这儿拉。这样 FlatPark 自己的
-ostree 仓库里只有一个几十 KB 的壳,几百兆的负载走 GitHub 的带宽。
+This repository builds the complete Bottles `/app` tree and attaches it to a
+GitHub release. FlatPark's `registry/com.usebottles.bottles/` pulls it in as
+**extra-data**, so FlatPark's own OSTree repository holds nothing but a shell of
+a few dozen kilobytes while the hundred-odd megabytes of payload travel over
+GitHub's bandwidth.
 
-manifest fork 自 [flathub/com.usebottles.bottles](https://github.com/flathub/com.usebottles.bottles),
-改动只有 `runtime-version: '49'` → `'50'`。GNOME 49 和 50 共用 freedesktop 25.08 基座
-(fdo 扩展版本、Python 3.13、`base: org.winehq.Wine//stable-25.08` 全不变,Platform 的
-`.so` 清单零删除),所以升级不需要动别的。
+The manifest is a fork of
+[flathub/com.usebottles.bottles](https://github.com/flathub/com.usebottles.bottles).
+**The only change is `runtime-version: '49'` → `'50'`.** GNOME 49 and 50 share
+the same freedesktop 25.08 base — the fdo extension versions, Python 3.13 and
+`base: org.winehq.Wine//stable-25.08` are all unchanged, and the Platform's `.so`
+inventory loses nothing between the two — so nothing else needs touching.
 
-构建配方即本仓库,满足 GPL-3.0 的源码提供义务。
+The build recipe is this repository, which satisfies the GPL-3.0 obligation to
+offer the corresponding source.
 
-## 产物
+## Artifacts
 
-每次 release 挂三个文件:
+Every release carries three files:
 
-| 文件 | 说明 |
+| File | Contents |
 |---|---|
-| `bottles-<ver>-x86_64.tar.zst` | 整棵 `/app` 树,解开后根目录叫 `bottles/` |
-| `bottles-<ver>-x86_64.tar.zst.sha256` | 校验和 |
-| `layout.json` | `lib/` 与 `share/` 的子目录清单,见下 |
+| `bottles-<ver>-x86_64.tar.zst` | the whole `/app` tree; unpacks to a `bottles/` root |
+| `bottles-<ver>-x86_64.tar.zst.sha256` | checksum |
+| `layout.json` | the `lib/` and `share/` subdirectory listing — see below |
 
-## 为什么产物需要后处理
+## Why the artifact needs post-processing
 
-FlatPark 侧这棵树**不落在 `/app`**。Flatpak 的 `apply_extra` 在安装期只有 `/app/extra`
-可写(`/app` 本身只读),沙箱里也起不了嵌套 bwrap 把它 bind 回去,所以树最终待在
-`/app/extra/bottles/`。于是构建完要做两件事:
+On the FlatPark side this tree **does not live at `/app`**. During installation
+Flatpak's `apply_extra` can only write to `/app/extra` — `/app` itself is
+read-only — and a Flatpak sandbox cannot start a nested bwrap to bind it back.
+So the tree ends up at `/app/extra/bottles/`, and two things have to happen
+after the build:
 
-**1. 改写 RUNPATH**(`scripts/relocate.py`)
+**1. Rewrite RUNPATHs** (`scripts/relocate.py`)
 
-wine、bottles-cli、libvte 这些主要二进制本来就没有 RUNPATH,靠 `LD_LIBRARY_PATH` 找库,
-搬家不受影响。但 wine 捆绑的 samba 有 400 多个库把 `/app/lib/samba`、`/app/lib32/samba`
-写死在 RUNPATH 里。脚本把它们逐个换算成 `$ORIGIN` 相对路径,并复核到零残留,
-有残留就让 CI 失败。
+wine, bottles-cli and libvte carry no RUNPATH at all; they find their libraries
+through `LD_LIBRARY_PATH` and are unaffected by the move. The samba libraries
+bundled with wine are the problem: over four hundred of them hardcode
+`/app/lib/samba` or `/app/lib32/samba`. The script converts each into an
+`$ORIGIN`-relative path, then verifies that not one absolute `/app` RUNPATH
+remains and fails the build if any does.
 
-**2. 导出 layout**(`scripts/layout.py`)
+**2. Emit the layout** (`scripts/layout.py`)
 
-FlatPark 的壳 manifest 里 `/app/lib` 和 `/app/share` **必须是真目录** —— flatpak-builder
-在构建期要往里面建扩展挂载点,穿不过悬空软链(会报 `Extension ... has invalid merge-dirs`)。
-所以壳是按**子目录**粒度软链回 payload 的,而那份列表写死在壳 manifest 里。
-`layout.json` 让 FlatPark 刷 pin 时能比对:payload 长出新子目录而壳没跟上,当场报错,
-不至于等用户装完才发现某个路径是空的。
+In FlatPark's shell manifest, `/app/lib` and `/app/share` **must be real
+directories** — flatpak-builder creates extension mount points inside them at
+build time and cannot traverse a dangling symlink to do so (it fails with
+`Extension ... has invalid merge-dirs`). The shell therefore symlinks back into
+the payload one subdirectory at a time, and that list is hardcoded in the shell
+manifest. `layout.json` lets FlatPark compare the two when refreshing its pin: if
+the payload grows a subdirectory the shell has not caught up with, the refresh
+fails right there, rather than shipping a package where some path silently
+resolves to nothing.
 
-被排除在软链之外、必须由 `/app` 真实持有的目录:
+Directories excluded from that list, because `/app` has to own them:
 
-- `lib/i386-linux-gnu` —— `Compat.i386` / `GL32` / `codecs_extra.i386` 的挂载点。
-  这个路径动不得:运行时里 `/lib/i386-linux-gnu -> ../../app/lib/i386-linux-gnu`
-  是写死的,挪走就 `/lib/ld-linux.so.2: could not open`,32 位全废。
-- `share/{applications,icons,metainfo}` —— 壳自带副本,flatpak 构建期要导出它们。
-- `share/{wine,steam}` —— `Wine.gecko` / `Wine.mono` / `Steam.CompatibilityTool` 的挂载点。
+- `lib/i386-linux-gnu` — mount point for `Compat.i386`, `GL32` and
+  `codecs_extra.i386`. This path cannot move: the runtime's
+  `/lib/i386-linux-gnu` is a hardcoded symlink to it, and relocating the
+  extension yields `/lib/ld-linux.so.2: could not open`, killing all 32-bit
+  support.
+- `share/{applications,icons,metainfo}` — the shell ships its own copies and
+  Flatpak exports them at build time.
+- `share/app-info` — flatpak-builder writes its own compiled AppStream into
+  `share/app-info/xmls`; a dangling symlink makes `appstreamcli compose` fail.
+- `share/{wine,steam}` — wine's own data directory, and the mount point for
+  `Steam.CompatibilityTool`.
 
-## 更新
+## Updating
 
-改 `com.usebottles.bottles.src.yaml` 里的 tag(以及需要时同步 upstream 的其它改动),
-推到 `main` 即触发构建;也可以在 Actions 里手动 `workflow_dispatch`。
-release 的 tag 取自 `src.yaml` 里的 Bottles 版本。
+Change the tag in `com.usebottles.bottles.src.yaml` (plus whatever else needs
+syncing from upstream) and push to `main` to trigger a build; the workflow also
+accepts a manual `workflow_dispatch`. The release tag is derived from the Bottles
+version in `src.yaml`.
 
-## 已知问题
+## Known issues
 
-Bottles 66.7 在 GNOME 50 的 libadwaita 1.9 下会刷这类 CRITICAL:
+Under GNOME 50's libadwaita 1.9, Bottles 66.7 emits warnings of this shape:
 
 ```
 Adwaita-CRITICAL: Trying to add GtkOverlay / AdwBanner / AdwPreferencesPage /
 AdwStatusPage as a child to an AdwPreferencePage, but only AdwPreferencesGroup is allowed
 ```
 
-不致命,应用照跑,但相关页面的渲染值得复验。这是 Bottles 自己的代码在 1.9 收紧
-子控件校验后暴露的问题,与本仓库的重定位无关(GNOME 49 下不出现)。
+They are not fatal — the app runs — but the affected pages are worth a visual
+check. This is Bottles' own code being caught out by 1.9 tightening its child
+validation; it has nothing to do with the relocation here, and it does not appear
+under GNOME 49.
+
+The workflow currently pins `runs-on: ubuntu-26.04`. `ubuntu-latest` (24.04)
+started hanging indefinitely in `apt-get` after image 20260816.277; switch back
+once that is fixed.
