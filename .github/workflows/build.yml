@@ -20,7 +20,11 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # ubuntu-latest(=24.04)换上 20260816.277 那版镜像后,Install build tools
+    # 里的 apt-get 会无限挂起 —— #4 和 #5 都停在同一条命令上,各耗掉一小时,
+    # 而同一段脚本在换镜像之前是几十秒的事。26.04 目前还是 public preview,
+    # 这里只是用它绕开那版镜像;24.04 修好之后换回 ubuntu-latest。
+    runs-on: ubuntu-26.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
