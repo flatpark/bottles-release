@@ -33,7 +33,8 @@ jobs:
                       /usr/local/share/boost /usr/share/swift
           df -h /
 
-      # 不用 ubuntu 仓库里的 flatpak-builder。noble 带的是 1.4.2,它不给 meson 传
+      # 发行版的 flatpak-builder(noble 是 1.4.2)只用来解析依赖 —— 那步不涉及
+      # libdir。真正的构建走 org.flatpak.Builder:noble 那个 1.4.2 不给 meson 传
       # --libdir=lib,而 SDK 沙箱里没有 /etc/debian_version、/usr/lib64 又是真目录,
       # 于是 meson 按默认逻辑选 lib64 —— libportal 和 vte 的 .so、typelib、pkgconfig
       # 全落到 /app/lib64,不在 LD_LIBRARY_PATH 上,Bottles 的终端和文件门户直接废。
@@ -41,11 +42,11 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak patchelf zstd
+          sudo apt-get install -y flatpak flatpak-builder patchelf zstd dbus-daemon
           flatpak remote-add --user --if-not-exists flathub \
               https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.flatpak.Builder
-          flatpak run --filesystem=host org.flatpak.Builder --version
+          dbus-run-session -- flatpak run --filesystem=host org.flatpak.Builder --version
 
       - name: Resolve Bottles version
         id: ver
@@ -58,13 +59,12 @@ jobs:
 
       - name: Install flatpak dependencies
         run: |
-          flatpak run --filesystem=host org.flatpak.Builder \
-              --user --install-deps-from=flathub --install-deps-only \
+          flatpak-builder --user --install-deps-from=flathub --install-deps-only \
               build com.usebottles.bottles.yml
 
       - name: Build
         run: |
-          flatpak run --filesystem=host org.flatpak.Builder \
+          dbus-run-session -- flatpak run --filesystem=host org.flatpak.Builder \
               --user --force-clean --disable-rofiles-fuse --ccache=false \
               build com.usebottles.bottles.yml
 
