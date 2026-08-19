@@ -1,0 +1,12 @@
+name: com.usebottles.bottles.src
+builddir: true
+buildsystem: meson
+sources:
+  - type: git
+    url: https://github.com/bottlesdevs/Bottles
+    tag: '66.7'
+    commit: 26a13d16d5a54afc83092fb8f88a9b0df683a5d5
+    x-checker-data:
+      type: git
+      is-main-source: true
+      tag-pattern: ^((?:\d+.?){1,2})$

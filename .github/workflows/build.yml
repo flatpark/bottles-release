@@ -1,0 +1,107 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'com.usebottles.bottles*'
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      # 构建要 ~15G:源码 + SDK + Wine base + build dir。runner 自带的
+      # Android/。NET/Haskell 工具链占了十几个 G,先腾出来。
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost /usr/share/swift
+          df -h /
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder patchelf zstd libarchive-tools
+          flatpak remote-add --user --if-not-exists flathub \
+              https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Resolve Bottles version
+        id: ver
+        run: |
+          v=$(sed -n "s/^ *tag: *'\{0,1\}\([0-9.]*\)'\{0,1\} *$/\1/p" \
+              com.usebottles.bottles.src.yaml | head -n1)
+          [ -n "$v" ] || { echo "无法从 src.yaml 解析 Bottles 版本" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Bottles $v"
+
+      - name: Install flatpak dependencies
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --install-deps-only \
+              build com.usebottles.bottles.yml
+
+      - name: Build
+        run: |
+          flatpak-builder --user --force-clean --disable-rofiles-fuse --ccache=false \
+              build com.usebottles.bottles.yml
+
+      # 这棵树在 FlatPark 侧会被解到 /app/extra/bottles 而不是 /app,
+      # 所以把写死 /app 的 RUNPATH 改成 $ORIGIN 相对。脚本自带复核,残留即失败。
+      - name: Relocate RUNPATHs
+        run: python3 scripts/relocate.py build/files
+
+      - name: Emit layout manifest
+        run: |
+          python3 scripts/layout.py build/files > layout.json
+          cat layout.json
+
+      - name: Sanity check
+        run: |
+          set -e
+          for f in bin/wine bin/wineserver bin/bottles bin/bottles-cli \
+                   share/bottles/bottles.gresource share/bottles/data.gresource; do
+            [ -e "build/files/$f" ] || { echo "产物缺少 $f" >&2; exit 1; }
+          done
+          # 扩展挂载点必须在树里存在,否则 FlatPark 壳挂不上
+          for d in lib/i386-linux-gnu lib/i386-linux-gnu/GL \
+                   lib/i386-linux-gnu/codecs-extra share/wine/gecko share/wine/mono; do
+            [ -d "build/files/$d" ] || { echo "产物缺少挂载点目录 $d" >&2; exit 1; }
+          done
+
+      - name: Package
+        id: pkg
+        run: |
+          v=${{ steps.ver.outputs.version }}
+          name=bottles-$v-x86_64.tar.zst
+          tar -I 'zstd -T0 -19' -cf "$name" -C build --transform 's|^files|bottles|' files
+          sha256sum "$name" | tee "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$name")" >> "$GITHUB_OUTPUT"
+          ls -lh "$name"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ steps.ver.outputs.version }}
+          tag="v$v"
+          name=${{ steps.pkg.outputs.name }}
+          notes=$(printf '%s\n' \
+            "Bottles $v,对着 GNOME 50 运行时构建,供 FlatPark 以 extra-data 消费。" \
+            "" \
+            "- \`$name\` — 整棵 /app 树,RUNPATH 已改写为 \$ORIGIN 相对" \
+            "- size: ${{ steps.pkg.outputs.size }}" \
+            "- \`layout.json\` — lib/ 与 share/ 子目录清单,FlatPark 壳据此校验软链列表" \
+            "" \
+            "构建配方即本仓库,满足 GPL-3.0 的源码提供义务。")
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "Bottles $v" --notes "$notes"
+          gh release upload "$tag" "$name" "$name.sha256" layout.json --clobber
