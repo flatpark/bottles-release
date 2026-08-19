@@ -18,8 +18,10 @@ import sys
 #                          且运行时的 /lib/i386-linux-gnu 写死指向它
 #   share/{applications,icons,metainfo} -> 壳自带副本,构建期要导出
 #   share/{wine,steam}  -> Wine.gecko / Wine.mono / Steam.CompatibilityTool 挂载点
+#   share/app-info      -> flatpak-builder 构建期要往 share/app-info/xmls 写自己
+#                          编译的 AppStream,悬空软链会让 appstreamcli compose 失败
 RESERVED = {"lib": {"i386-linux-gnu"},
-            "share": {"applications", "icons", "metainfo", "wine", "steam"}}
+            "share": {"applications", "icons", "metainfo", "wine", "steam", "app-info"}}
 
 
 def subdirs(tree, top):
