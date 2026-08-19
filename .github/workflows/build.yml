@@ -9,6 +9,12 @@ on:
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
+# 两个 run 会往同一个 release tag 上传同名产物,串行化避免互相踩。
+# cancel-in-progress: false —— 跑到一半的构建有价值,让它跑完再排下一个。
+concurrency:
+  group: build
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -27,12 +33,19 @@ jobs:
                       /usr/local/share/boost /usr/share/swift
           df -h /
 
+      # 不用 ubuntu 仓库里的 flatpak-builder。noble 带的是 1.4.2,它不给 meson 传
+      # --libdir=lib,而 SDK 沙箱里没有 /etc/debian_version、/usr/lib64 又是真目录,
+      # 于是 meson 按默认逻辑选 lib64 —— libportal 和 vte 的 .so、typelib、pkgconfig
+      # 全落到 /app/lib64,不在 LD_LIBRARY_PATH 上,Bottles 的终端和文件门户直接废。
+      # org.flatpak.Builder 是 Flathub 自己构建时用的那份,跟着上游走。
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder patchelf zstd libarchive-tools
+          sudo apt-get install -y flatpak patchelf zstd
           flatpak remote-add --user --if-not-exists flathub \
               https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.flatpak.Builder
+          flatpak run --filesystem=host org.flatpak.Builder --version
 
       - name: Resolve Bottles version
         id: ver
@@ -45,18 +58,27 @@ jobs:
 
       - name: Install flatpak dependencies
         run: |
-          flatpak-builder --user --install-deps-from=flathub --install-deps-only \
+          flatpak run --filesystem=host org.flatpak.Builder \
+              --user --install-deps-from=flathub --install-deps-only \
               build com.usebottles.bottles.yml
 
       - name: Build
         run: |
-          flatpak-builder --user --force-clean --disable-rofiles-fuse --ccache=false \
+          flatpak run --filesystem=host org.flatpak.Builder \
+              --user --force-clean --disable-rofiles-fuse --ccache=false \
               build com.usebottles.bottles.yml
 
       # 这棵树在 FlatPark 侧会被解到 /app/extra/bottles 而不是 /app,
       # 所以把写死 /app 的 RUNPATH 改成 $ORIGIN 相对。脚本自带复核,残留即失败。
       - name: Relocate RUNPATHs
         run: python3 scripts/relocate.py build/files
+
+      # FlatPark 不发 .Debug 扩展,54M 的调试符号白占负载。在这儿剔掉而不是给
+      # manifest 加 no-debuginfo,是为了让 fork 与上游保持一行之差。
+      - name: Drop debug symbols
+        run: |
+          du -sh build/files/lib/debug || true
+          rm -rf build/files/lib/debug
 
       - name: Emit layout manifest
         run: |
@@ -74,6 +96,20 @@ jobs:
           for d in lib/i386-linux-gnu lib/i386-linux-gnu/GL \
                    lib/i386-linux-gnu/codecs-extra share/wine/gecko share/wine/mono; do
             [ -d "build/files/$d" ] || { echo "产物缺少挂载点目录 $d" >&2; exit 1; }
+          done
+          # 扩展挂载点必须在树里存在,否则 FlatPark 壳挂不上
+          # meson 的 libdir 一旦选成 lib64,libportal/vte 的 .so 和 typelib 就会
+          # 落在 LD_LIBRARY_PATH 之外 —— 应用照样打包成功,但终端和门户是坏的。
+          # 这是静默故障,所以在这儿拦死。
+          [ ! -d build/files/lib64 ] || {
+            echo "产物里出现了 lib64,meson 的 libdir 选错了:" >&2
+            find build/files/lib64 -maxdepth 2 >&2
+            exit 1
+          }
+          for f in lib/libvte-2.91-gtk4.so.0 lib/libportal.so.1 lib/libportal-gtk4.so.1 \
+                   lib/girepository-1.0/Vte-3.91.typelib \
+                   lib/girepository-1.0/Xdp-1.0.typelib; do
+            [ -e "build/files/$f" ] || { echo "产物缺少 $f" >&2; exit 1; }
           done
 
       - name: Package
