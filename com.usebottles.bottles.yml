@@ -2,8 +2,8 @@ id: com.usebottles.bottles
 sdk: org.gnome.Sdk
 runtime: org.gnome.Platform
 base: org.winehq.Wine
-base-version: stable-25.08
-runtime-version: '50'
+base-version: stable-26.08
+runtime-version: '51'
 command: bottles
 
 finish-args:
@@ -28,23 +28,40 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.golang
 
 inherit-extensions:
-  - org.freedesktop.Platform.GL32
   - org.winehq.Wine.gecko
   - org.winehq.Wine.mono
 
 add-extensions:
+  # Up to stable-25.08 the Wine base declared every i386 extension point and this
+  # manifest inherited GL32 from it. stable-26.08 is a new-WoW64 build: it has no
+  # 32-bit unix side at all and declares none of them, so GL32 is spelled out here
+  # — Bottles' downloaded runners are conventional wine builds and still need the
+  # 32-bit driver stack.
+  org.freedesktop.Platform.GL32:
+    directory: lib/i386-linux-gnu/GL
+    version: '1.4'
+    versions: 26.08;26.08-extra;1.4
+    subdirectories: true
+    no-autodownload: true
+    autodelete: false
+    add-ld-path: lib
+    merge-dirs: vulkan/icd.d;glvnd/egl_vendor.d;egl/egl_external_platform.d;OpenCL/vendors;lib/dri;lib/d3d;lib/gbm;vulkan/explicit_layer.d;vulkan/implicit_layer.d;vdpau
+    download-if: active-gl-driver
+    enable-if: active-gl-driver
+    autoprune-unless: active-gl-driver
+
   org.freedesktop.Platform.Compat.i386:
     directory: lib/i386-linux-gnu
-    version: "25.08"
+    version: "26.08"
 
   org.freedesktop.Platform.Compat.i386.Debug:
     directory: lib/debug/lib/i386-linux-gnu
-    version: "25.08"
+    version: "26.08"
     no-autodownload: true
 
   org.freedesktop.Platform.codecs_extra.i386:
     directory: lib/i386-linux-gnu/codecs-extra
-    version: '25.08-extra'
+    version: '26.08-extra'
     autodelete: false
     add-ld-path: lib
 
@@ -82,6 +99,7 @@ cleanup-commands:
   - mkdir -p /app/share/steam/compatibilitytools.d
   - mkdir -p /app/share/vulkan/implicit_layer.d/
   - mkdir -p /app/lib/i386-linux-gnu/codecs-extra
+  - mkdir -p /app/lib/i386-linux-gnu/GL
 
 modules:
   # Eagle modules

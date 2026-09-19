@@ -9,11 +9,31 @@ a few dozen kilobytes while the hundred-odd megabytes of payload travel over
 GitHub's bandwidth.
 
 The manifest is a fork of
-[flathub/com.usebottles.bottles](https://github.com/flathub/com.usebottles.bottles).
-**The only change is `runtime-version: '49'` → `'50'`.** GNOME 49 and 50 share
-the same freedesktop 25.08 base — the fdo extension versions, Python 3.13 and
-`base: org.winehq.Wine//stable-25.08` are all unchanged, and the Platform's `.so`
-inventory loses nothing between the two — so nothing else needs touching.
+[flathub/com.usebottles.bottles](https://github.com/flathub/com.usebottles.bottles),
+which at the time of writing still targets GNOME 50. This fork targets **GNOME 51**
+on the freedesktop 26.08 base, which takes three changes beyond the version numbers:
+
+1. **`base: org.winehq.Wine//stable-26.08`.** That base is a new-WoW64 build
+   (`--enable-archs=i386,x86_64`): it has no 32-bit unix side at all — no `lib32`,
+   no `lib/wine/i386-unix`, no 32-bit krb5/unixodbc/samba — and it declares none of
+   the i386 extension points that `stable-25.08` declared. The payload is therefore
+   about 50 MB smaller than the GNOME 50 one, and the bundled "system" runner is
+   WoW64 rather than a 32-on-32 build. Runners that Bottles downloads at runtime are
+   conventional wine builds and still get their 32-bit system libraries from
+   `org.freedesktop.Platform.Compat.i386//26.08` and their 32-bit drivers from
+   `org.freedesktop.Platform.GL32`, both of which the FlatPark shell mounts.
+2. **`org.freedesktop.Platform.GL32` is declared here instead of inherited.** Since
+   the 26.08 Wine base no longer declares it, `inherit-extensions` fails the build at
+   the very last step with `Can't find inherited extension point`. The declaration is
+   copied from the `stable-25.08` Wine manifest, and `cleanup-commands` now creates
+   the `lib/i386-linux-gnu/GL` mount point that the base used to create.
+3. **The PyPI wheels are regenerated for CPython 3.14** (GNOME 51 ships 3.14, GNOME 50
+   shipped 3.13): `req2flatpak.py --target-platforms 314-x86_64`. `yara-python` and
+   `pycurl` have no cp314 wheels at the versions Bottles pins, so both come in as
+   sdists — they compile offline inside the build sandbox, and `yara-python`'s sdist
+   carries the whole of libyara, so it needs nothing from outside. `pycairo` and
+   `PyGObject` stay listed as sdists but are never built: the runtime already provides
+   them, and `--exists-action=i` against an unversioned requirement leaves them alone.
 
 The build recipe is this repository, which satisfies the GPL-3.0 obligation to
 offer the corresponding source.
@@ -80,7 +100,8 @@ version in `src.yaml`.
 
 ## Known issues
 
-Under GNOME 50's libadwaita 1.9, Bottles 66.7 emits warnings of this shape:
+From libadwaita 1.9 onwards (GNOME 50 and later), Bottles emits warnings of this
+shape:
 
 ```
 Adwaita-CRITICAL: Trying to add GtkOverlay / AdwBanner / AdwPreferencesPage /
@@ -89,7 +110,7 @@ AdwStatusPage as a child to an AdwPreferencePage, but only AdwPreferencesGroup i
 
 They are not fatal — the app runs — but the affected pages are worth a visual
 check. This is Bottles' own code being caught out by 1.9 tightening its child
-validation; it has nothing to do with the relocation here, and it does not appear
+validation; it has nothing to do with the relocation here, and it did not appear
 under GNOME 49.
 
 The workflow currently pins `runs-on: ubuntu-26.04`. `ubuntu-latest` (24.04)

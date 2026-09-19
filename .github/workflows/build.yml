@@ -149,7 +149,7 @@ jobs:
           tag="v$v"
           name=${{ steps.pkg.outputs.name }}
           notes=$(printf '%s\n' \
-            "Bottles $v, built against the GNOME 50 runtime, for FlatPark to consume as extra-data." \
+            "Bottles $v, built against the GNOME 51 runtime, for FlatPark to consume as extra-data." \
             "" \
             "- \`$name\` — the whole /app tree, RUNPATHs rewritten to be \$ORIGIN-relative" \
             "- size: ${{ steps.pkg.outputs.size }}" \
